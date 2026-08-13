@@ -9,7 +9,7 @@ TTAKTScanner Web is the iPhone/Android browser edition of the scanner. It has no
 - Local OCR for the invoice code before the `nömrəli fakturaya əsasən` anchor
 - Local OCR for all receipt values below the `Qəbz` column header
 - Multiple pages, JPG export, one-PDF export, reset/new document, and Web Share / WhatsApp handoff
-- Installable browser app (PWA) after the first visit
+- Safari “Add to Home Screen” support after the first visit
 
 ## GitHub and Vercel deployment
 

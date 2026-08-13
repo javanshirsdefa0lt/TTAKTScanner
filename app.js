@@ -83,11 +83,6 @@
     el.shareWhatsapp.addEventListener('click', shareOnWhatsapp);
     el.resetScan.addEventListener('click', resetCurrentScan);
     render();
-    registerServiceWorker();
-  }
-
-  function registerServiceWorker() {
-    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => undefined);
   }
 
   function switchMode(mode) {
