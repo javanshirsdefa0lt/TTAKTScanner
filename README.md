@@ -5,7 +5,7 @@ TTAKTScanner Web is the iPhone/Android browser edition of the scanner. It has no
 ## What it does
 
 - Separate **Təhvil-təslim aktı** and **Konteyner aktı** panels
-- Camera/photo selection, document-edge detection, perspective correction, and colour-preserving scan preview
+- Camera/photo selection, fast colour-preserving scan preview, and manual rotate
 - Local OCR for the invoice code before the `nömrəli fakturaya əsasən` anchor
 - Local OCR for all receipt values below the `Qəbz` column header
 - Multiple pages, JPG export, one-PDF export, reset/new document, and Web Share / WhatsApp handoff

@@ -3,12 +3,12 @@
   'use strict';
 
   const MAX_SOURCE_EDGE = 2300;
-  const MAX_DETECTION_EDGE = 1280;
-  const OCV_READY_TIMEOUT = 20000;
 
   const el = {
     cameraInput: document.querySelector('#cameraInput'),
     fileInput: document.querySelector('#fileInput'),
+    cameraButton: document.querySelector('#cameraButton'),
+    fileButton: document.querySelector('#fileButton'),
     modeButtons: [...document.querySelectorAll('.mode-button')],
     modeCopy: document.querySelector('#modeCopy'),
     modeDescription: document.querySelector('#modeDescription'),
@@ -39,7 +39,6 @@
     worker: null,
     workerPromise: null,
     ocrQueue: Promise.resolve(),
-    cvPromise: null,
     processing: 0
   };
 
@@ -73,6 +72,8 @@
     el.modeButtons.forEach((button) => button.addEventListener('click', () => switchMode(button.dataset.mode)));
     el.cameraInput.addEventListener('change', onFileChosen);
     el.fileInput.addEventListener('change', onFileChosen);
+    el.cameraButton.addEventListener('click', () => el.cameraInput.click());
+    el.fileButton.addEventListener('click', () => el.fileInput.click());
     el.codeField.addEventListener('input', () => { currentSession().code = el.codeField.value; });
     el.rotateLeft.addEventListener('click', () => rotateActivePage(-90));
     el.rotateRight.addEventListener('click', () => rotateActivePage(90));
@@ -167,7 +168,9 @@
     setWorking(true, 'Rəngli scan hazırlanır…', modeAtStart);
     try {
       const sourceCanvas = await imageFileToCanvas(file);
-      const scan = await makeColorScan(sourceCanvas);
+      // iPhone Safari-də OpenCV WebAssembly başlanğıcı donma yaradırdı.
+      // Scan indi dərhal rəngli orijinaldan hazırlanır; rotate və export qalır.
+      const scan = { canvas: cloneCanvas(sourceCanvas), detected: false };
       if (generation !== session.generation) return;
       session.pages.push({ sourceCanvas, scanCanvas: scan.canvas, detected: scan.detected });
       session.activeIndex = session.pages.length - 1;
@@ -222,134 +225,6 @@
       });
       return image;
     } finally { URL.revokeObjectURL(url); }
-  }
-
-  async function makeColorScan(sourceCanvas) {
-    try {
-      const cv = await getOpenCv();
-      return scanWithOpenCv(cv, sourceCanvas);
-    } catch (_) {
-      return { canvas: cloneCanvas(sourceCanvas), detected: false };
-    }
-  }
-
-  function getOpenCv() {
-    if (state.cvPromise) return state.cvPromise;
-    state.cvPromise = new Promise((resolve, reject) => {
-      const ready = (module) => module && module.Mat && typeof module.imread === 'function';
-      const cv = window.cv;
-      if (ready(cv)) { resolve(cv); return; }
-      if (typeof cv === 'function') {
-        Promise.resolve(cv()).then((module) => {
-          if (ready(module)) { window.cv = module; resolve(module); } else reject(new Error('OpenCV hazır deyil.'));
-        }).catch(reject);
-        return;
-      }
-      if (!cv) { reject(new Error('OpenCV yüklənmədi.')); return; }
-      const timer = window.setTimeout(() => reject(new Error('OpenCV gecikdi.')), OCV_READY_TIMEOUT);
-      const previous = cv.onRuntimeInitialized;
-      cv.onRuntimeInitialized = () => {
-        window.clearTimeout(timer);
-        if (typeof previous === 'function') previous();
-        ready(window.cv) ? resolve(window.cv) : reject(new Error('OpenCV hazır deyil.'));
-      };
-    });
-    return state.cvPromise;
-  }
-
-  function scanWithOpenCv(cv, sourceCanvas) {
-    const source = cv.imread(sourceCanvas);
-    const detection = new cv.Mat();
-    let warped = null;
-    try {
-      const largest = Math.max(source.cols, source.rows);
-      const factor = Math.min(1, MAX_DETECTION_EDGE / largest);
-      cv.resize(source, detection, new cv.Size(Math.round(source.cols * factor), Math.round(source.rows * factor)), 0, 0, cv.INTER_AREA);
-      const corners = detectDocumentCorners(cv, detection);
-      if (corners) {
-        const fullCorners = corners.map((point) => ({ x: point.x / factor, y: point.y / factor }));
-        warped = warpDocument(cv, source, fullCorners);
-      } else {
-        warped = source.clone();
-      }
-      const canvas = document.createElement('canvas');
-      cv.imshow(canvas, warped);
-      return { canvas, detected: Boolean(corners) };
-    } finally {
-      source.delete();
-      detection.delete();
-      warped?.delete();
-    }
-  }
-
-  function detectDocumentCorners(cv, rgba) {
-    const gray = new cv.Mat();
-    const blur = new cv.Mat();
-    const edges = new cv.Mat();
-    const hierarchy = new cv.Mat();
-    const contours = new cv.MatVector();
-    const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-    let best = null;
-    let bestArea = 0;
-    try {
-      cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY);
-      cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-      cv.Canny(blur, edges, 60, 160);
-      cv.dilate(edges, edges, kernel);
-      cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-      const imageArea = rgba.cols * rgba.rows;
-      for (let index = 0; index < contours.size(); index += 1) {
-        const contour = contours.get(index);
-        const approx = new cv.Mat();
-        try {
-          cv.approxPolyDP(contour, approx, cv.arcLength(contour, true) * .02, true);
-          if (approx.rows !== 4 || !cv.isContourConvex(approx)) continue;
-          const area = Math.abs(cv.contourArea(approx));
-          const bounds = cv.boundingRect(approx);
-          const coversMostOfImage = bounds.width / rgba.cols >= .70 && bounds.height / rgba.rows >= .70;
-          if (area <= imageArea * .40 || !coversMostOfImage || area <= bestArea) continue;
-          const points = pointsFromMat(approx);
-          if (points.length !== 4) continue;
-          best = orderCorners(points);
-          bestArea = area;
-        } finally {
-          contour.delete();
-          approx.delete();
-        }
-      }
-      return best;
-    } finally {
-      gray.delete(); blur.delete(); edges.delete(); hierarchy.delete(); contours.delete(); kernel.delete();
-    }
-  }
-
-  function pointsFromMat(mat) {
-    const data = mat.data32S?.length ? mat.data32S : mat.data32F;
-    const points = [];
-    for (let index = 0; index + 1 < data.length; index += 2) points.push({ x: data[index], y: data[index + 1] });
-    return points;
-  }
-
-  function orderCorners(points) {
-    const bySum = [...points].sort((a, b) => (a.x + a.y) - (b.x + b.y));
-    const byDiff = [...points].sort((a, b) => (a.y - a.x) - (b.y - b.x));
-    return [bySum[0], byDiff[0], bySum[3], byDiff[3]];
-  }
-
-  function warpDocument(cv, source, points) {
-    const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-    const width = Math.max(600, Math.round(Math.max(distance(points[0], points[1]), distance(points[3], points[2]))));
-    const height = Math.max(600, Math.round(Math.max(distance(points[0], points[3]), distance(points[1], points[2]))));
-    const sourcePoints = cv.matFromArray(4, 1, cv.CV_32FC2, points.flatMap((point) => [point.x, point.y]));
-    const destinationPoints = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, width - 1, 0, width - 1, height - 1, 0, height - 1]);
-    const transform = cv.getPerspectiveTransform(sourcePoints, destinationPoints);
-    const output = new cv.Mat();
-    try {
-      cv.warpPerspective(source, output, transform, new cv.Size(width, height), cv.INTER_CUBIC, cv.BORDER_REPLICATE);
-      return output;
-    } finally {
-      sourcePoints.delete(); destinationPoints.delete(); transform.delete();
-    }
   }
 
   function cloneCanvas(source) {

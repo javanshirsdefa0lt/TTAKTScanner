@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ttakt-scanner-web-v1';
+const CACHE_NAME = 'ttakt-scanner-web-v2';
 const APP_FILES = [
   './',
   './index.html',
@@ -6,7 +6,6 @@ const APP_FILES = [
   './app.js',
   './manifest.webmanifest',
   './assets/ttakt-scanner-logo.png',
-  './vendor/opencv.js',
   './vendor/tesseract.min.js',
   './vendor/worker.min.js',
   './vendor/tesseract-core.wasm.js',

@@ -40,13 +40,13 @@
         </div>
 
         <div class="capture-grid">
-          <label class="primary-action capture-label" for="cameraInput">
+          <button class="primary-action capture-label" id="cameraButton" type="button">
             <span class="camera-icon" aria-hidden="true">▣</span>
             <span>SƏNƏDİ ÇƏK</span>
-          </label>
-          <label class="secondary-action capture-label" for="fileInput">
+          </button>
+          <button class="secondary-action capture-label" id="fileButton" type="button">
             <span>FOTODAN SEÇ</span>
-          </label>
+          </button>
           <input id="cameraInput" class="visually-hidden" type="file" accept="image/*" capture="environment" />
           <input id="fileInput" class="visually-hidden" type="file" accept="image/*" />
         </div>
@@ -102,7 +102,6 @@
       </footer>
     </main>
 
-    <script src="./vendor/opencv.js"></script>
     <script src="./vendor/tesseract.min.js"></script>
     <script src="./vendor/jspdf.umd.min.js"></script>
     <script src="./app.js"></script>
