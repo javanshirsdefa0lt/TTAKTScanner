@@ -1,0 +1,11 @@
+{
+  "name": "ttakt-scanner-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Token-free browser-local document scanner for TTAKTScanner.",
+  "type": "module",
+  "scripts": {
+    "build": "node --check app.js && node scripts/verify.mjs",
+    "dev": "node scripts/serve.mjs"
+  }
+}

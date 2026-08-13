@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="az">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a443f" />
+    <meta name="description" content="TTAKTScanner — browserdə lokal sənəd scan və OCR." />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./assets/ttakt-scanner-logo.png" type="image/png" />
+    <link rel="apple-touch-icon" href="./assets/ttakt-scanner-logo.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>TTAKTScanner Web</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <img class="brand-mark" src="./assets/ttakt-scanner-logo.png" alt="TTAKTScanner logo" />
+        <div>
+          <p class="eyebrow">LOCAL DOCUMENT SCANNER</p>
+          <h1>TTAKTScanner</h1>
+        </div>
+        <span class="local-badge" title="No token or cloud AI">LOCAL</span>
+      </header>
+
+      <section class="intro" aria-label="Tətbiq haqqında">
+        <h2>Sənədi çək, rəngli scan et, paylaş.</h2>
+        <p>Kamera, kənarların tapılması, OCR və PDF bu brauzerdə işləyir. Token, API açarı və bulud AI yoxdur.</p>
+      </section>
+
+      <nav class="mode-switch" aria-label="Akt növü" role="tablist">
+        <button class="mode-button active" type="button" data-mode="delivery" role="tab" aria-selected="true">Təhvil-təslim aktı</button>
+        <button class="mode-button" type="button" data-mode="container" role="tab" aria-selected="false">Konteyner aktı</button>
+      </nav>
+
+      <section class="scanner-card" aria-label="Sənəd scanneri">
+        <div class="mode-copy" id="modeCopy">
+          <p class="section-label">TƏHVİL-TƏSLİM AKTI</p>
+          <h3>Faktura kodunu tap</h3>
+          <p id="modeDescription">“nömrəli fakturaya əsasən” ifadəsindən əvvəlki rəqəmlər birləşdiriləcək.</p>
+        </div>
+
+        <div class="capture-grid">
+          <label class="primary-action capture-label" for="cameraInput">
+            <span class="camera-icon" aria-hidden="true">▣</span>
+            <span>SƏNƏDİ ÇƏK</span>
+          </label>
+          <label class="secondary-action capture-label" for="fileInput">
+            <span>FOTODAN SEÇ</span>
+          </label>
+          <input id="cameraInput" class="visually-hidden" type="file" accept="image/*" capture="environment" />
+          <input id="fileInput" class="visually-hidden" type="file" accept="image/*" />
+        </div>
+
+        <div class="working-state" id="workingState" hidden aria-live="polite">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="workingText">Scan hazırlanır…</span>
+        </div>
+
+        <div class="preview-area empty" id="previewArea">
+          <canvas id="previewCanvas" aria-label="Scan edilmiş sənəd önizləməsi"></canvas>
+          <div class="empty-preview" id="emptyPreview">
+            <span class="document-glyph" aria-hidden="true">▤</span>
+            <p>Şəkil çəkildikdən sonra rəngli scan burada görünəcək.</p>
+          </div>
+        </div>
+
+        <p class="scan-status" id="scanStatus" role="status">Sənədin şəklini çəkin.</p>
+        <p class="scan-detail" id="scanDetail">Scan rəngləri qoruyur; yalnız kənar və perspektiv düzəlişi edilir.</p>
+
+        <div class="preview-controls" id="previewControls" hidden>
+          <button class="text-action" type="button" id="rotateLeft">↶ Döndər</button>
+          <button class="text-action" type="button" id="rotateRight">Döndər ↷</button>
+          <button class="text-action" type="button" id="addPage">+ Səhifə əlavə et</button>
+        </div>
+        <div class="page-strip" id="pageStrip" aria-label="Scan edilmiş səhifələr"></div>
+      </section>
+
+      <section class="codes-card" aria-label="OCR nəticəsi">
+        <div class="field-heading">
+          <div>
+            <p class="section-label" id="codeLabel">FAKTURA KODU</p>
+            <p class="field-help" id="fieldHelp">OCR nəticəsini göndərməzdən əvvəl yoxlayın.</p>
+          </div>
+          <span class="page-count" id="pageCount">0 səhifə</span>
+        </div>
+        <textarea id="codeField" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Faktura kodu" placeholder=""></textarea>
+      </section>
+
+      <section class="actions-card" aria-label="Saxlama və paylaşma">
+        <div class="save-row">
+          <button class="primary-action" type="button" id="saveJpg" disabled>Save as JPG</button>
+          <button class="secondary-action" type="button" id="savePdf" disabled>Save as PDF</button>
+        </div>
+        <button class="whatsapp-action" type="button" id="shareWhatsapp" disabled>WhatsApp-da foto kimi paylaş</button>
+        <button class="reset-action" type="button" id="resetScan" disabled>SIFIRLA / YENİ AKT</button>
+        <p class="ios-note">iPhone-da “Save as JPG” düyməsi paylaşım pəncərəsini aça bilər. Oradan <strong>Save Image</strong> seçin.</p>
+      </section>
+
+      <footer>
+        <p>Developed by Javanshir Suleymanov © 2026. All rights reserved.</p>
+        <p class="footer-subline">TTAKTScanner Web • Browser-local processing</p>
+      </footer>
+    </main>
+
+    <script src="./vendor/opencv.js"></script>
+    <script src="./vendor/tesseract.min.js"></script>
+    <script src="./vendor/jspdf.umd.min.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
