@@ -5,7 +5,7 @@
   "description": "Token-free browser-local document scanner for TTAKTScanner.",
   "type": "module",
   "scripts": {
-    "build": "node --check app.js && node scripts/verify.mjs",
+    "build": "node scripts/build.mjs && node --check app.js && node scripts/verify.mjs",
     "dev": "node scripts/serve.mjs"
   }
 }

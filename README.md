@@ -15,7 +15,7 @@ TTAKTScanner Web is the iPhone/Android browser edition of the scanner. It has no
 
 1. Create a new **private** GitHub repository and upload the full contents of this folder.
 2. In Vercel, choose **Add New → Project**, import that GitHub repository, then deploy.
-3. No environment variables, API key, token, database, or build setting is required. Vercel serves this as a static site.
+3. No environment variables, API key, token, database, or build setting is required. Vercel reads the included configuration and serves this as a static site.
 4. Open the Vercel HTTPS address from Safari on the iPhone and allow camera access. Safari can also use **Share → Add to Home Screen**.
 
 On iPhone, browsers cannot silently write a file straight to the Photos gallery. The JPG button therefore opens the iOS share sheet when supported; choose **Save Image** there. WhatsApp sharing also opens the native iOS share sheet, where WhatsApp is selected by the user.
