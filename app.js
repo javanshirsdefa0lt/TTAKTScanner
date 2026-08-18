@@ -721,19 +721,59 @@
   }
 
   async function findReceiptNumbersWithColumnPass(worker, source, receiptOcrCanvas, data) {
-    const rough = findReceiptNumbers(data);
-    const words = wordsFromTsv(data?.tsv);
-    const lines = linesFromTsv(data?.tsv);
-    const headers = receiptHeadersFrom(words, lines);
-    if (!headers.length) return rough;
+    const { headers, numbers } = receiptHeaderCandidates(data);
+    if (!headers.length) return [];
 
     let best = [];
     // The real Qebz header yields the longest contiguous set directly below it.
     for (const header of headers.slice(0, 2)) {
-      const refined = await readReceiptColumn(worker, source, receiptOcrCanvas, header);
+      const rows = receiptRowsForHeader(header, numbers);
+      // Re-OCR each cell at its own measured position with a digit-only
+      // whitelist — more accurate than the full-page pass. A fixed row-pitch
+      // estimate is only used when the full-page pass found no rows at all,
+      // since that estimate drifts whenever a document's real line spacing
+      // doesn't match the fixed multiplier it assumes.
+      const refined = rows.length
+        ? await refineReceiptRows(worker, source, receiptOcrCanvas, rows)
+        : await readReceiptColumn(worker, source, receiptOcrCanvas, header);
       if (refined.length > best.length) best = refined;
     }
-    return best.length ? best : rough;
+    return best;
+  }
+
+  async function refineReceiptRows(worker, source, receiptOcrCanvas, rows) {
+    const scaleX = source.width / receiptOcrCanvas.width;
+    const scaleY = source.height / receiptOcrCanvas.height;
+    const values = [];
+    for (const row of rows) {
+      const left = Math.max(0, Math.round((row.left - row.width * .3) * scaleX));
+      const width = Math.min(source.width - left, Math.max(1, Math.round(row.width * 1.6 * scaleX)));
+      const height = Math.max(1, Math.round(row.height * 1.8 * scaleY));
+      const top = Math.max(0, Math.round((row.centerY - row.height * 0.9) * scaleY));
+      const xShift = Math.max(1, Math.round(width * .03));
+      const yShift = Math.max(1, Math.round(height * .13));
+      const refinedValue = await readReceiptRow(worker, source, left, top, width, height, xShift, yShift);
+      values.push(pickReceiptValue(row.value, refinedValue));
+    }
+    return values;
+  }
+
+  // The full-page value already passed this table's row/column geometry
+  // checks (receiptRowsForHeader), so on a clean crop it isn't automatically
+  // less trustworthy than the digit-only single-line re-OCR — testing found
+  // the latter can still misread a digit (e.g. 5 as 9) the full-page pass
+  // got right, and a longer-but-wrong re-OCR reading (extra/garbled digits
+  // from a slightly misjudged crop) must not win just for being longer. The
+  // re-OCR's real job is rescuing rows the full-page pass missed entirely or
+  // read as letters, so it only overrides the full-page value when it
+  // strictly extends it — same digits plus more at one edge — which is what
+  // an undersized full-page crop looks like, as opposed to a mismatch.
+  function pickReceiptValue(pageValue, refinedValue) {
+    if (!refinedValue) return pageValue || null;
+    if (!pageValue) return refinedValue;
+    if (pageValue === refinedValue) return pageValue;
+    if (refinedValue.length > pageValue.length && refinedValue.includes(pageValue)) return refinedValue;
+    return pageValue;
   }
 
   async function readReceiptColumn(worker, source, receiptOcrCanvas, header) {
@@ -772,30 +812,45 @@
   }
 
   async function readReceiptRow(worker, source, left, top, width, height, xShift, yShift) {
-    const votes = new Map();
     // Small shifts protect against table borders, shadows and marker strokes.
-    // A number is accepted only when two local reads agree; no number length is
-    // assumed or hard-coded.
+    // [0,0] and [xShift,0] share the same vertical offset, so when the row
+    // crop clips a digit's edge both can misread it the same way — two
+    // matching reads used to be accepted as "confirmed" even though they
+    // shared the exact same clipping error. All offsets are collected instead
+    // and the value most of them agree on wins; a clear unshifted read with
+    // very high confidence still short-circuits for speed.
+    // PSM 7 ("single line") applies Tesseract's line-finding heuristics,
+    // which on a small isolated digit crop repeatably misread distinct
+    // digits (e.g. 5 as 3). PSM 13 ("raw line") skips those heuristics and
+    // reads the crop as-is, which measured reliably correct on the same crops.
     const offsets = [
       [0, 0], [xShift, 0], [xShift, yShift],
       [0, yShift], [-xShift, yShift]
     ];
+    const votes = new Map();
     for (const [offsetX, offsetY] of offsets) {
       const canvas = receiptRowCanvas(source, left + offsetX, top + offsetY, width, height);
       const recognition = await worker.recognize(canvas, {
-        tessedit_pageseg_mode: 7,
+        tessedit_pageseg_mode: 13,
         tessedit_char_whitelist: '0123456789'
       });
       const value = String(recognition.data.text || '').replace(/\D/g, '');
+      const confidence = Number(recognition.data.confidence || 0);
       if (!value) continue;
-      const count = (votes.get(value) || 0) + 1;
-      votes.set(value, count);
-      // Clear numeric cells can be accepted immediately.  Low-confidence
-      // cells are checked by a second, slightly shifted crop.
-      if (offsetX === 0 && offsetY === 0 && Number(recognition.data.confidence || 0) >= 60) return value;
-      if (count >= 2) return value;
+      if (offsetX === 0 && offsetY === 0 && confidence >= 85) return value;
+      const entry = votes.get(value) || { count: 0, bestConfidence: 0 };
+      entry.count += 1;
+      entry.bestConfidence = Math.max(entry.bestConfidence, confidence);
+      votes.set(value, entry);
     }
-    return null;
+    let winner = null;
+    for (const [value, entry] of votes) {
+      if (!winner || entry.count > winner.count ||
+          (entry.count === winner.count && entry.bestConfidence > winner.bestConfidence)) {
+        winner = { value, count: entry.count, bestConfidence: entry.bestConfidence };
+      }
+    }
+    return winner ? winner.value : null;
   }
 
   function isReceiptValueConsistent(value, previousValues) {
@@ -1025,37 +1080,49 @@
   }
 
   function findReceiptNumbers(data) {
+    const { headers, numbers } = receiptHeaderCandidates(data);
+    let best = [];
+    for (const header of headers) {
+      const values = receiptRowsForHeader(header, numbers).map((row) => row.value);
+      if (values.length > best.length) best = values;
+    }
+    return best;
+  }
+
+  function receiptHeaderCandidates(data) {
     const words = wordsFromTsv(data?.tsv);
     const lines = linesFromTsv(data?.tsv);
     const headers = receiptHeadersFrom(words, lines);
-    if (!headers.length) return [];
     let numbers = words.map((word) => ({ ...word, value: numericCellValue(word.text) })).filter((word) => word.value);
     // Tesseract usually returns cell-sized word boxes.  Keep a line fallback
     // for scans where it exposed a whole receipt cell as one line instead.
     if (!numbers.length) numbers = lines.map((line) => ({ ...line, value: numericCellValue(line.text) })).filter((line) => line.value);
-    let best = [];
-    for (const header of headers) {
-      const candidates = numbers.filter((word) => isBelowHeader(word, header) && isInHeaderColumn(word, header));
-      const groupedRows = makeRows(candidates);
-      if (!groupedRows.length) continue;
-      const startGap = groupedRows[0].centerY - centerY(header);
-      if (startGap > Math.max(header.height * 6.5, groupedRows[0].height * 4)) continue;
-      const values = [];
-      let previous = null;
-      let typicalPitch = 0;
-      for (const row of groupedRows) {
-        if (previous) {
-          const gap = row.centerY - previous.centerY;
-          const gapLimit = Math.max(Math.max(header.height, previous.height, row.height) * 4.5, typicalPitch ? typicalPitch * 2.5 : 0);
-          if (gap > gapLimit) break;
-          typicalPitch = typicalPitch ? typicalPitch * .65 + gap * .35 : gap;
-        }
-        values.push(row.value);
-        previous = row;
+    return { headers, numbers };
+  }
+
+  // Rows this header's column actually contains, at their own measured TSV
+  // position — not a row-pitch estimate. Returns row boxes (not just values)
+  // so callers can re-OCR each cell at its real location.
+  function receiptRowsForHeader(header, numbers) {
+    const candidates = numbers.filter((word) => isBelowHeader(word, header) && isInHeaderColumn(word, header));
+    const groupedRows = makeRows(candidates);
+    if (!groupedRows.length) return [];
+    const startGap = groupedRows[0].centerY - centerY(header);
+    if (startGap > Math.max(header.height * 6.5, groupedRows[0].height * 4)) return [];
+    const rows = [];
+    let previous = null;
+    let typicalPitch = 0;
+    for (const row of groupedRows) {
+      if (previous) {
+        const gap = row.centerY - previous.centerY;
+        const gapLimit = Math.max(Math.max(header.height, previous.height, row.height) * 4.5, typicalPitch ? typicalPitch * 2.5 : 0);
+        if (gap > gapLimit) break;
+        typicalPitch = typicalPitch ? typicalPitch * .65 + gap * .35 : gap;
       }
-      if (values.length > best.length) best = values;
+      rows.push(row);
+      previous = row;
     }
-    return best;
+    return rows;
   }
 
   function receiptHeadersFrom(words, lines) {
@@ -1191,12 +1258,14 @@
     for (const token of sorted) {
       const row = rows.at(-1);
       if (!row || Math.abs(centerY(token) - row.centerY) > Math.max(3, Math.max(token.height, row.height) * .6)) {
-        rows.push({ tokens: [token], centerY: centerY(token), height: token.height, value: token.value });
+        rows.push({ tokens: [token], centerY: centerY(token), height: token.height, value: token.value, left: token.left, top: token.top, width: token.width });
       } else {
         row.tokens.push(token);
         row.centerY = row.tokens.reduce((sum, item) => sum + centerY(item), 0) / row.tokens.length;
         row.height = row.tokens.reduce((sum, item) => sum + item.height, 0) / row.tokens.length;
         row.value = [...row.tokens].sort((a, b) => a.left - b.left).map((item) => item.value).join('');
+        const box = boxAround(row.tokens);
+        row.left = box.left; row.top = box.top; row.width = box.width;
       }
     }
     return rows;
