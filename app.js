@@ -34,7 +34,14 @@
     saveJpg: document.querySelector('#saveJpg'),
     savePdf: document.querySelector('#savePdf'),
     shareWhatsapp: document.querySelector('#shareWhatsapp'),
-    resetScan: document.querySelector('#resetScan')
+    resetScan: document.querySelector('#resetScan'),
+    cameraOverlay: document.querySelector('#cameraOverlay'),
+    cameraVideo: document.querySelector('#cameraVideo'),
+    cameraGuide: document.querySelector('#cameraGuide'),
+    cameraClose: document.querySelector('#cameraClose'),
+    cameraFlash: document.querySelector('#cameraFlash'),
+    cameraHint: document.querySelector('#cameraHint'),
+    cameraShutter: document.querySelector('#cameraShutter')
   };
 
   const state = {
@@ -43,7 +50,19 @@
     worker: null,
     workerPromise: null,
     ocrQueue: Promise.resolve(),
-    processing: 0
+    processing: 0,
+    cvWorker: null,
+    cvPending: new Map(),
+    cvNextId: 1,
+    cameraStream: null,
+    cameraModeAtOpen: null,
+    cameraAnalyzing: false,
+    cameraCapturing: false,
+    cameraRafId: null,
+    cameraLastRun: 0,
+    cameraStability: null,
+    cameraTorchTrack: null,
+    cameraTorchOn: false
   };
 
   function createSession() {
@@ -76,12 +95,15 @@
     el.modeButtons.forEach((button) => button.addEventListener('click', () => switchMode(button.dataset.mode)));
     el.cameraInput.addEventListener('change', onFileChosen);
     el.fileInput.addEventListener('change', onFileChosen);
-    el.cameraButton.addEventListener('click', () => el.cameraInput.click());
+    el.cameraButton.addEventListener('click', () => openCamera());
     el.fileButton.addEventListener('click', () => el.fileInput.click());
     el.codeField.addEventListener('input', () => { currentSession().code = el.codeField.value; });
     el.rotateLeft.addEventListener('click', () => rotateActivePage(-90));
     el.rotateRight.addEventListener('click', () => rotateActivePage(90));
-    el.addPage.addEventListener('click', () => el.cameraInput.click());
+    el.addPage.addEventListener('click', () => openCamera());
+    el.cameraClose.addEventListener('click', () => closeCamera());
+    el.cameraShutter.addEventListener('click', () => manualCapture());
+    el.cameraFlash.addEventListener('click', () => toggleTorch());
     el.saveJpg.addEventListener('click', saveAllAsJpg);
     el.savePdf.addEventListener('click', saveAllAsPdf);
     el.shareWhatsapp.addEventListener('click', shareOnWhatsapp);
@@ -90,6 +112,9 @@
     // Start the local model while the user is framing the document.  It keeps
     // the first tap-to-scan path short without sending the photo anywhere.
     window.setTimeout(() => { getOcrWorker().catch(() => undefined); }, 120);
+    // Same idea for the ~10MB OpenCV.js WASM bundle: load it in its Worker now
+    // so the first Auto Scan doesn't pay that cost.
+    window.setTimeout(() => { try { getCvWorker(); } catch (_) { /* falls back per-scan */ } }, 200);
   }
 
   function switchMode(mode) {
@@ -165,14 +190,31 @@
     event.target.value = '';
     if (!file || !file.type.startsWith('image/')) return;
     const modeAtStart = state.mode;
+    try {
+      const sourceCanvas = await imageFileToCanvas(file);
+      await acceptSourceCanvas(sourceCanvas, modeAtStart);
+    } catch (error) {
+      if (state.mode === modeAtStart) {
+        el.scanStatus.textContent = 'Scan hazırlana bilmədi. Şəkli yenidən çəkin.';
+        el.scanDetail.textContent = error?.message || 'Naməlum xəta.';
+      }
+    }
+  }
+
+  /** Shared by the file picker and the live camera capture path below. */
+  async function acceptSourceCanvas(sourceCanvas, modeAtStart) {
     const session = state.sessions[modeAtStart];
     const generation = session.generation;
     setWorking(true, 'Rəngli scan hazırlanır…', modeAtStart);
     try {
-      const sourceCanvas = await imageFileToCanvas(file);
-      // iPhone Safari-də OpenCV WebAssembly başlanğıcı donma yaradırdı.
-      // Scan indi dərhal rəngli orijinaldan hazırlanır; rotate və export qalır.
-      const scan = { canvas: cloneCanvas(sourceCanvas), detected: false };
+      // OpenCV now runs in a Worker (vendor/opencv-worker.js) instead of on
+      // this thread, so the page never freezes the way the old synchronous
+      // call did on iPhone Safari; a slow/failed detection just falls back
+      // to the full-colour original instead of blocking the UI.
+      const detection = await scanWithAutoDetect(sourceCanvas);
+      const scan = detection.detected
+        ? { canvas: imageDataToCanvas(detection.imageData), detected: true }
+        : { canvas: cloneCanvas(sourceCanvas), detected: false };
       if (generation !== session.generation) return;
       session.pages.push({ sourceCanvas, scanCanvas: scan.canvas, detected: scan.detected });
       session.activeIndex = session.pages.length - 1;
@@ -237,6 +279,337 @@
     return clone;
   }
 
+  // ---- Auto Scan: outer-contour detection + perspective correction ---------
+  // Runs entirely in vendor/opencv-worker.js. A crashed/unavailable worker or
+  // a detection that takes too long both resolve to {detected:false}, so the
+  // caller always falls back to the untouched colour original — Auto Scan is
+  // an enhancement here, never a hard requirement to produce a scan at all.
+
+  function getCvWorker() {
+    if (!state.cvWorker) {
+      state.cvWorker = new Worker(new URL('./vendor/opencv-worker.js', document.baseURI).href);
+      state.cvWorker.onmessage = (event) => {
+        const pending = state.cvPending.get(event.data.id);
+        if (!pending) return;
+        state.cvPending.delete(event.data.id);
+        pending(event.data);
+      };
+      state.cvWorker.onerror = () => {
+        // A malformed message can't be matched to a pending id; fail every
+        // outstanding request rather than leaving callers waiting forever.
+        for (const resolve of state.cvPending.values()) resolve({ ok: false });
+        state.cvPending.clear();
+      };
+    }
+    return state.cvWorker;
+  }
+
+  function scanWithAutoDetect(sourceCanvas, timeoutMs = 7000) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      try {
+        const worker = getCvWorker();
+        const id = state.cvNextId += 1;
+        const context = sourceCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
+        const imageData = context.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+        const timer = setTimeout(() => {
+          state.cvPending.delete(id);
+          finish({ detected: false });
+        }, timeoutMs);
+        state.cvPending.set(id, (data) => {
+          clearTimeout(timer);
+          finish(data.ok && data.detected ? data : { detected: false });
+        });
+        worker.postMessage({ id, mode: 'detect-and-warp', imageData }, [imageData.data.buffer]);
+      } catch (_) {
+        finish({ detected: false });
+      }
+    });
+  }
+
+  function imageDataToCanvas(imageData) {
+    const canvas = document.createElement('canvas');
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+    canvas.getContext('2d', { alpha: false }).putImageData(imageData, 0, 0);
+    return canvas;
+  }
+
+  // ---- Live camera: getUserMedia preview + Auto Scan overlay ---------------
+  // Mirrors the native app's ScanCameraActivity: a live feed with a corner
+  // overlay, auto-capture once the same page holds steady for several
+  // consecutive frames, and a manual shutter that always works regardless.
+  // Falls back to the OS camera app (the existing file-input path) if
+  // getUserMedia isn't available or permission is refused — the user is
+  // never left without a way to take the photo.
+
+  const CAMERA_ANALYSIS_INTERVAL_MS = 260;
+  const CAMERA_REQUIRED_STABLE_FRAMES = 5;
+  const CAMERA_MAX_CORNER_DRIFT_FRACTION = 0.02;
+  const CAMERA_DETECTION_MAX_EDGE = 640;
+  const CAMERA_CAPTURE_MAX_EDGE = MAX_SOURCE_EDGE;
+
+  async function openCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      el.cameraInput.click();
+      return;
+    }
+    state.cameraModeAtOpen = state.mode;
+    showCameraOverlay(true);
+    el.cameraHint.textContent = 'Sənədi kadra tam yerləşdirin';
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false
+      });
+      state.cameraStream = stream;
+      el.cameraVideo.srcObject = stream;
+      await el.cameraVideo.play().catch(() => undefined);
+      setupTorch(stream);
+      state.cameraStability = { lastCorners: null, streak: 0 };
+      state.cameraRafId = requestAnimationFrame(cameraLoop);
+    } catch (_) {
+      // Permission denied, no camera, insecure context, etc. — the file
+      // input (with capture="environment") is still a working path in.
+      closeCamera();
+      el.cameraInput.click();
+    }
+  }
+
+  function showCameraOverlay(visible) {
+    el.cameraOverlay.classList.toggle('active', visible);
+    el.cameraOverlay.setAttribute('aria-hidden', String(!visible));
+  }
+
+  function closeCamera() {
+    showCameraOverlay(false);
+    if (state.cameraRafId) cancelAnimationFrame(state.cameraRafId);
+    state.cameraRafId = null;
+    state.cameraAnalyzing = false;
+    state.cameraCapturing = false;
+    state.cameraStability = null;
+    if (state.cameraStream) {
+      state.cameraStream.getTracks().forEach((track) => track.stop());
+      state.cameraStream = null;
+    }
+    el.cameraVideo.srcObject = null;
+    el.cameraFlash.hidden = true;
+    state.cameraTorchTrack = null;
+    state.cameraTorchOn = false;
+  }
+
+  function setupTorch(stream) {
+    const track = stream.getVideoTracks()[0];
+    const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+    if (!capabilities.torch) {
+      el.cameraFlash.hidden = true;
+      return;
+    }
+    state.cameraTorchTrack = track;
+    state.cameraTorchOn = false;
+    el.cameraFlash.hidden = false;
+  }
+
+  function toggleTorch() {
+    if (!state.cameraTorchTrack) return;
+    state.cameraTorchOn = !state.cameraTorchOn;
+    state.cameraTorchTrack.applyConstraints({ advanced: [{ torch: state.cameraTorchOn }] }).catch(() => undefined);
+  }
+
+  function cameraLoop(timestamp) {
+    if (!state.cameraStream) return; // camera was closed
+    state.cameraRafId = requestAnimationFrame(cameraLoop);
+    if (state.cameraAnalyzing || state.cameraCapturing) return;
+    if (timestamp - state.cameraLastRun < CAMERA_ANALYSIS_INTERVAL_MS) return;
+    state.cameraLastRun = timestamp;
+    analyzeCameraFrame();
+  }
+
+  async function analyzeCameraFrame() {
+    const video = el.cameraVideo;
+    if (!video.videoWidth || !video.videoHeight) return;
+    state.cameraAnalyzing = true;
+    try {
+      const scale = Math.min(1, CAMERA_DETECTION_MAX_EDGE / Math.max(video.videoWidth, video.videoHeight));
+      const w = Math.max(1, Math.round(video.videoWidth * scale));
+      const h = Math.max(1, Math.round(video.videoHeight * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const context = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+      context.drawImage(video, 0, 0, w, h);
+      const imageData = context.getImageData(0, 0, w, h);
+      const result = await cvDetectOnly(imageData);
+      if (!state.cameraStream) return; // closed while awaiting the worker
+      const status = updateCameraStability(result);
+      drawCameraGuide(result, status);
+      updateCameraHint(status);
+      if (status === 'ready' && !state.cameraCapturing) autoCapture();
+    } catch (_) {
+      // A single bad frame must never stop the live loop.
+    } finally {
+      state.cameraAnalyzing = false;
+    }
+  }
+
+  function cvDetectOnly(imageData) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => { if (!settled) { settled = true; resolve(value); } };
+      try {
+        const worker = getCvWorker();
+        const id = state.cvNextId += 1;
+        const timer = setTimeout(() => { state.cvPending.delete(id); finish({ detected: false }); }, 1500);
+        state.cvPending.set(id, (data) => {
+          clearTimeout(timer);
+          finish(data.ok ? data : { detected: false });
+        });
+        worker.postMessage({ id, mode: 'detect-only', imageData });
+      } catch (_) {
+        finish({ detected: false });
+      }
+    });
+  }
+
+  function updateCameraStability(result) {
+    const tracker = state.cameraStability;
+    if (!tracker) return 'searching';
+    if (!result.detected || !result.corners) {
+      tracker.lastCorners = null;
+      tracker.streak = 0;
+      tracker.lastResult = result;
+      return 'searching';
+    }
+    const stable = tracker.lastCorners && isCornerSetStable(tracker.lastCorners, result.corners, result.width, result.height);
+    tracker.streak = stable ? tracker.streak + 1 : 1;
+    tracker.lastCorners = result.corners;
+    tracker.lastResult = result;
+    return tracker.streak >= CAMERA_REQUIRED_STABLE_FRAMES ? 'ready' : 'detected';
+  }
+
+  function isCornerSetStable(a, b, width, height) {
+    const diagonal = Math.hypot(width, height);
+    const maxAllowed = diagonal * CAMERA_MAX_CORNER_DRIFT_FRACTION;
+    for (let i = 0; i < 4; i += 1) {
+      if (Math.hypot(a[i].x - b[i].x, a[i].y - b[i].y) > maxAllowed) return false;
+    }
+    return true;
+  }
+
+  function updateCameraHint(status) {
+    if (state.cameraCapturing) return;
+    if (status === 'ready') el.cameraHint.textContent = 'Hazırdır — çəkilir';
+    else if (status === 'detected') el.cameraHint.textContent = 'Sənəd tapıldı, sabitlənir…';
+    else el.cameraHint.textContent = 'Sənədi kadra tam yerləşdirin';
+  }
+
+  /** Draws the tracked quad (object-fit:cover-aware) or a static search hint. */
+  function drawCameraGuide(result, status) {
+    const canvas = el.cameraGuide;
+    const box = el.cameraVideo.getBoundingClientRect();
+    if (canvas.width !== box.width || canvas.height !== box.height) {
+      canvas.width = box.width;
+      canvas.height = box.height;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const accent = status === 'ready' ? '#E31E24' : 'rgba(255,255,255,0.92)';
+
+    if (!result.detected || !result.corners) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([10, 8]);
+      const mx = canvas.width * 0.10, my = canvas.height * 0.18;
+      roundRectPath(ctx, mx, my, canvas.width - 2 * mx, canvas.height - 2 * my, 18);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      return;
+    }
+
+    const mapped = result.corners.map((point) =>
+      mapDetectionPointToCoverBox(point, result.width, result.height, canvas.width, canvas.height));
+    ctx.beginPath();
+    mapped.forEach((point, index) => (index === 0 ? ctx.moveTo(point.x, point.y) : ctx.lineTo(point.x, point.y)));
+    ctx.closePath();
+    ctx.fillStyle = status === 'ready' ? 'rgba(227,30,36,0.16)' : 'rgba(255,255,255,0.10)';
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    const bracket = 22;
+    mapped.forEach((point) => {
+      ctx.beginPath();
+      ctx.moveTo(point.x - bracket / 2, point.y);
+      ctx.lineTo(point.x + bracket / 2, point.y);
+      ctx.moveTo(point.x, point.y - bracket / 2);
+      ctx.lineTo(point.x, point.y + bracket / 2);
+      ctx.stroke();
+    });
+  }
+
+  /** Video is shown with CSS object-fit:cover; maps a detection-frame point into that box exactly. */
+  function mapDetectionPointToCoverBox(point, detectionWidth, detectionHeight, boxWidth, boxHeight) {
+    const videoAspect = detectionWidth / detectionHeight;
+    const boxAspect = boxWidth / boxHeight;
+    let scale, offsetX = 0, offsetY = 0;
+    if (videoAspect > boxAspect) {
+      scale = boxHeight / detectionHeight;
+      offsetX = (detectionWidth * scale - boxWidth) / 2;
+    } else {
+      scale = boxWidth / detectionWidth;
+      offsetY = (detectionHeight * scale - boxHeight) / 2;
+    }
+    return { x: point.x * scale - offsetX, y: point.y * scale - offsetY };
+  }
+
+  function roundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function autoCapture() {
+    state.cameraCapturing = true;
+    el.cameraHint.textContent = 'Şəkil hazırlanır…';
+    captureCurrentFrame();
+  }
+
+  function manualCapture() {
+    if (!state.cameraStream || state.cameraCapturing) return;
+    state.cameraCapturing = true;
+    el.cameraHint.textContent = 'Şəkil hazırlanır…';
+    captureCurrentFrame();
+  }
+
+  async function captureCurrentFrame() {
+    const video = el.cameraVideo;
+    const modeAtCapture = state.cameraModeAtOpen;
+    try {
+      const scale = Math.min(1, CAMERA_CAPTURE_MAX_EDGE / Math.max(video.videoWidth, video.videoHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      canvas.getContext('2d', { alpha: false }).drawImage(video, 0, 0, canvas.width, canvas.height);
+      closeCamera();
+      await acceptSourceCanvas(canvas, modeAtCapture);
+    } catch (_) {
+      closeCamera();
+    }
+  }
+
   function queueOcr(page, mode, session, generation) {
     state.ocrQueue = state.ocrQueue.catch(() => undefined).then(() => runOcr(page, mode, session, generation));
   }
@@ -291,10 +664,13 @@
     if (state.worker) return state.worker;
     if (!state.workerPromise) {
       if (!window.Tesseract) throw new Error('OCR modulu yüklənmədi.');
+      // Absolute URLs: the worker's own importScripts() resolves relative
+      // paths against ITS location (/vendor/), not the page's, so a relative
+      // './vendor/...' here doubled up into '/vendor/vendor/...' and 404'd.
       state.workerPromise = window.Tesseract.createWorker('eng', 1, {
-        workerPath: './vendor/worker.min.js',
-        corePath: './vendor/tesseract-core.wasm.js',
-        langPath: './vendor/tessdata',
+        workerPath: new URL('./vendor/worker.min.js', document.baseURI).href,
+        corePath: new URL('./vendor/tesseract-core.wasm.js', document.baseURI).href,
+        langPath: new URL('./vendor/tessdata', document.baseURI).href,
         cacheMethod: 'write',
         cachePath: 'ttakt-ocr-v3',
         workerBlobURL: false

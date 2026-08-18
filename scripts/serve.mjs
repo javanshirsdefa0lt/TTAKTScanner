@@ -9,7 +9,8 @@ const server = createServer((request, response) => {
   const safe = normalize(requested === '/' ? '/index.html' : requested).replace(/^([/\\])+/, '');
   const file = join(root, safe);
   if (!file.startsWith(root) || !existsSync(file) || statSync(file).isDirectory()) { response.writeHead(404); response.end('Not found'); return; }
-  response.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
+  const size = statSync(file).size;
+  response.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream', 'Content-Length': size, 'Cache-Control': 'no-store' });
   createReadStream(file).pipe(response);
 });
 server.listen(4173, () => console.log('Local URL: http://localhost:4173'));

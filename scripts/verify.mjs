@@ -2,7 +2,9 @@ import { access, readFile } from 'node:fs/promises';
 
 const required = [
   'index.html', 'styles.css', 'app.js', 'service-worker.js', 'manifest.webmanifest', 'vercel.json',
-  'assets/ttakt-scanner-logo.png', 'vendor/tesseract.min.js', 'vendor/worker.min.js',
+  'assets/brand-mark.png', 'assets/icon-192.png', 'assets/icon-512.png', 'assets/maskable-512.png',
+  'assets/apple-touch-icon.png', 'assets/favicon-32.png', 'assets/favicon-16.png',
+  'vendor/tesseract.min.js', 'vendor/worker.min.js', 'vendor/opencv.js',
   'vendor/tesseract-core.wasm.js', 'vendor/tesseract-core.wasm', 'vendor/tessdata/eng.traineddata.gz', 'vendor/jspdf.umd.min.js'
 ];
 
