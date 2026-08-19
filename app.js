@@ -1334,7 +1334,7 @@
     return `Faktura № ${numbers[0]}`;
   }
 
-  function shareOnWhatsapp() {
+  async function shareOnWhatsapp() {
     const session = currentSession();
     if (!session.pages.length || state.processing) return;
     const numbers = state.mode === 'container'
@@ -1348,11 +1348,19 @@
     }
     const caption = whatsappCaption(state.mode, numbers);
     try {
-      // A browser may open WhatsApp with text, but it cannot attach a local photo
-      // directly to WhatsApp without the system share sheet. Keep the photo as a
-      // normal saved JPG and take the user straight to WhatsApp for the caption.
-      window.location.href = `https://wa.me/?text=${encodeURIComponent(caption)}`;
-      session.lastDetail = 'WhatsApp açıldı. Alıcını seçin.';
+      const files = await pageFiles(session.pages, 'TTAKT_SCAN');
+      if (navigator.share && navigator.canShare?.({ files })) {
+        // Photo + caption together via the system share sheet — WhatsApp is
+        // one of the targets the user picks there. A direct wa.me link can
+        // only ever carry text: it has no way to attach a local file.
+        await navigator.share({ files, text: caption, title: 'TTAKTScanner' });
+        session.lastDetail = 'Paylaşım pəncərəsi açıldı — şəkil və kod birlikdə göndərmək üçün WhatsApp seçin.';
+      } else {
+        // This browser can't share files at all; fall back to text-only so
+        // the caption still reaches WhatsApp instead of failing silently.
+        window.location.href = `https://wa.me/?text=${encodeURIComponent(caption)}`;
+        session.lastDetail = 'Bu brauzer şəkil paylaşımını dəstəkləmir — WhatsApp yalnız kodla açıldı. Şəkli "Save as JPG" ilə saxlayıb əl ilə əlavə edin.';
+      }
     } catch (error) {
       if (error?.name !== 'AbortError') session.lastDetail = 'WhatsApp paylaşımı baş tutmadı.';
     }
